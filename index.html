@@ -49,8 +49,7 @@ async function load() {
       const commits = e.payload.commits || [];
       const list = commits.length ? commits.slice().reverse() : [{ sha: e.payload.head, message: "Push naar " + branch }];
       for (const c of list) pushes.push({
-        sha: c.sha.slice(0,7), message: c.message.split("
-")[0], author: e.actor.login, avatar: e.actor.avatar_url,
+        sha: c.sha.slice(0,7), message: c.message.split(/\r?\n/)[0], author: e.actor.login, avatar: e.actor.avatar_url,
         branch, date: e.created_at, url: `https://github.com/${REPO}/commit/${c.sha}`
       });
     }
