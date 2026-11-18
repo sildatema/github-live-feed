@@ -37,29 +37,42 @@ async function gh(path) {
   return r.json();
 }
 
+// Commit-details per sha onthouden: na de eerste keer kost een poll bijna niets.
+const CK = "commits:" + REPO;
+let commitCache = {}; try { commitCache = JSON.parse(localStorage.getItem(CK) || "{}"); } catch {}
+const saveCache = () => { try { localStorage.setItem(CK, JSON.stringify(commitCache)); } catch {} };
+let lastPulls = [];
+
 const seen = new Set(); let first = true, timer;
 async function load() {
+  let limited = null;
+  const pushes = [];
   try {
-    // 1 verzoek voor alle pushes (events) + 1 voor PRs. Beide ETag-gecached.
-    const events = await gh("/events?per_page=100");
-    const pushes = [];
-    for (const e of events) {
-      if (e.type !== "PushEvent") continue;
-      const branch = e.payload.ref.replace("refs/heads/", "");
-      const commits = e.payload.commits || [];
-      const list = commits.length ? commits.slice().reverse() : [{ sha: e.payload.head, message: "Push naar " + branch }];
-      for (const c of list) pushes.push({
-        sha: c.sha.slice(0,7), message: c.message.split(/\r?\n/)[0], author: e.actor.login, avatar: e.actor.avatar_url,
-        branch, date: e.created_at, url: `https://github.com/${REPO}/commit/${c.sha}`
-      });
+    const branches = await gh("/branches?per_page=100");   // altijd actueel, ETag-gecached
+    for (const b of branches) {
+      let c = commitCache[b.commit.sha];
+      if (!c && !limited) {
+        try {
+          const d = await gh("/commits/" + b.commit.sha);
+          c = commitCache[b.commit.sha] = { sha: d.sha.slice(0,7), full: d.sha, message: d.commit.message.split(/\r?\n/)[0], author: d.author?.login || d.commit.author.name, avatar: d.author?.avatar_url || "", date: d.commit.author.date };
+          saveCache();
+        } catch (e) { if (e instanceof RateLimited) limited = e; else throw e; }
+      }
+      if (c) pushes.push({ ...c, branch: b.name, url: `https://github.com/${REPO}/commit/${c.full || c.sha}` });
+      else pushes.push({ sha: b.commit.sha.slice(0,7), message: "(details volgen)", author: "", avatar: "", date: 0, branch: b.name, url: `https://github.com/${REPO}/commit/${b.commit.sha}` });
     }
-    const prs = await gh("/pulls?state=all&sort=updated&direction=desc&per_page=20");
+    pushes.sort((a,b) => new Date(b.date) - new Date(a.date));
+    try { lastPulls = await gh("/pulls?state=all&sort=updated&direction=desc&per_page=20"); }
+    catch (e) { if (e instanceof RateLimited) limited = limited || e; else throw e; }
+    const prs = lastPulls;
 
     $("repo").textContent = REPO;
-    $("dot").className = "dot ok";
-    $("st").textContent = "live · elke minuut · bijgewerkt " + new Date().toLocaleTimeString("nl-NL");
+    $("dot").className = "dot" + (limited ? "" : " ok");
+    $("st").textContent = limited
+      ? "GitHub-limiet bereikt, toont opgeslagen gegevens" + (limited.message ? " (reset " + new Date(limited.message*1000).toLocaleTimeString("nl-NL") + ")" : "")
+      : "live · elke minuut · bijgewerkt " + new Date().toLocaleTimeString("nl-NL");
     $("pushes").innerHTML = pushes.slice(0,50).map(p => { const k="p"+p.sha+p.branch, n=!first&&!seen.has(k); seen.add(k);
-      return `<a href="${p.url}" target="_blank" rel="noopener"><div class="item${n?" new":""}"><img src="${p.avatar}" alt=""><div><div class="t">${esc(p.message)}</div><div class="mut">${esc(p.author)} · <span class="tag">${esc(p.branch)}</span> · ${p.sha} · ${ago(p.date)}</div></div></div></a>`; }).join("") || '<div class="mut">Niets gevonden</div>';
+      return `<a href="${p.url}" target="_blank" rel="noopener"><div class="item${n?" new":""}"><img src="${p.avatar}" alt=""><div><div class="t">${esc(p.message)}</div><div class="mut">${p.author ? esc(p.author) + " · " : ""}<span class="tag">${esc(p.branch)}</span> · ${p.sha}${p.date ? " · " + ago(p.date) : ""}</div></div></div></a>`; }).join("") || '<div class="mut">Niets gevonden</div>';
     $("pulls").innerHTML = prs.map(p => { const st=p.merged_at?"merged":p.draft?"draft":p.state, k="r"+p.number+p.updated_at, n=!first&&!seen.has(k); seen.add(k);
       return `<a href="${p.html_url}" target="_blank" rel="noopener"><div class="item${n?" new":""}"><img src="${p.user.avatar_url}" alt=""><div><div class="t">#${p.number} ${esc(p.title)}</div><div class="mut">${esc(p.user.login)} · <span class="${st}">${st}</span> · ${esc(p.head.ref)} → ${esc(p.base.ref)} · ${ago(p.updated_at)}</div></div></div></a>`; }).join("") || '<div class="mut">Geen PRs</div>';
     first = false;
