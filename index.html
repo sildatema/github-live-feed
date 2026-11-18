@@ -28,11 +28,6 @@ const $ = id => document.getElementById(id);
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const ago = d => { const s=(Date.now()-new Date(d))/1000; return s<60?"zojuist":s<3600?Math.floor(s/60)+" min geleden":s<86400?Math.floor(s/3600)+" u geleden":Math.floor(s/86400)+" d geleden"; };
 
-// Commit-details per sha onthouden, zodat herladen geen extra verzoeken kost.
-const CK = "commits:" + REPO;
-let commitCache = {}; try { commitCache = JSON.parse(localStorage.getItem(CK) || "{}"); } catch {}
-const saveCache = () => { try { localStorage.setItem(CK, JSON.stringify(commitCache)); } catch {} };
-
 class RateLimited extends Error {}
 async function gh(path) {
   // "no-cache" = altijd hervalideren via ETag; een 304 telt niet mee voor de rate limit.
@@ -45,18 +40,20 @@ async function gh(path) {
 const seen = new Set(); let first = true, timer;
 async function load() {
   try {
-    const branches = await gh("/branches?per_page=100");
+    // 1 verzoek voor alle pushes (events) + 1 voor PRs. Beide ETag-gecached.
+    const events = await gh("/events?per_page=100");
     const pushes = [];
-    for (const b of branches) {
-      let c = commitCache[b.commit.sha];
-      if (!c) {
-        const d = await gh("/commits/" + b.commit.sha);
-        c = commitCache[b.commit.sha] = { sha: d.sha.slice(0,7), message: d.commit.message.split("\n")[0], author: d.author?.login || d.commit.author.name, avatar: d.author?.avatar_url || "", date: d.commit.author.date, url: d.html_url };
-        saveCache();
-      }
-      pushes.push({ ...c, branch: b.name });
+    for (const e of events) {
+      if (e.type !== "PushEvent") continue;
+      const branch = e.payload.ref.replace("refs/heads/", "");
+      const commits = e.payload.commits || [];
+      const list = commits.length ? commits.slice().reverse() : [{ sha: e.payload.head, message: "Push naar " + branch }];
+      for (const c of list) pushes.push({
+        sha: c.sha.slice(0,7), message: c.message.split("
+")[0], author: e.actor.login, avatar: e.actor.avatar_url,
+        branch, date: e.created_at, url: `https://github.com/${REPO}/commit/${c.sha}`
+      });
     }
-    pushes.sort((a,b) => new Date(b.date) - new Date(a.date));
     const prs = await gh("/pulls?state=all&sort=updated&direction=desc&per_page=20");
 
     $("repo").textContent = REPO;
